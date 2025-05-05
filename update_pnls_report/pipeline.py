@@ -91,7 +91,7 @@ def update_pnls_report(
         include_inconsistent_data=include_inconsistent_data,
     )
 
-    run_notebook_data_extraction(
+    run_notebook_update_pnls_report(
         df=df_final, fp_historical_data=fp_historical_data, annee_extraction=annee_extraction
     )
 
@@ -371,7 +371,7 @@ def generate_extraction_periods(
 
 
 @update_pnls_report.task
-def run_notebook_data_extraction(
+def run_notebook_update_pnls_report(
     df: pl.DataFrame, fp_historical_data: str, annee_extraction: int
 ) -> None:
     """Run a Jupyter notebook for data extraction.
