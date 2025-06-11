@@ -96,7 +96,7 @@ def update_pnls_report(
     )
 
 
-@update_pnls_report.task
+# @update_pnls_report.task
 def consolidate_dhis2_and_naomi_data(
     dhis2: DHIS2,
     annee_extraction: int,
@@ -139,7 +139,7 @@ def consolidate_dhis2_and_naomi_data(
         coc=coc,
         fp_ressources=fp_ressources,
     )
-    df_ist, workbook = filter_consistent_data_by_rules(
+    dico_ist = filter_consistent_data_by_rules(
         df_data=df_ist,
         organisation_units=organisation_units,
         include_inconsistent_data=include_inconsistent_data,
@@ -147,6 +147,8 @@ def consolidate_dhis2_and_naomi_data(
         workbook=workbook,
         pathologie="IST CD",
     )
+    df_ist = dico_ist["data"]
+    workbook = dico_ist["workbook"]
 
     df_pec = extract_dhis2_pec_data(
         dhis2=dhis2,
@@ -155,7 +157,7 @@ def consolidate_dhis2_and_naomi_data(
         coc=coc,
         fp_ressources=fp_ressources,
     )
-    df_pec, workbook = filter_consistent_data_by_rules(
+    dico_pec = filter_consistent_data_by_rules(
         df_data=df_pec,
         organisation_units=organisation_units,
         include_inconsistent_data=include_inconsistent_data,
@@ -163,6 +165,7 @@ def consolidate_dhis2_and_naomi_data(
         workbook=workbook,
         pathologie="PEC",
     )
+    df_pec, workbook = dico_pec["data"], dico_pec["workbook"]
     df_pec_agg = extract_dhis2_pec_aggregated_data(
         dhis2=dhis2,
         ou_ids=df_pec.select("organisation_unit_id").unique().to_series().to_list(),
@@ -177,7 +180,7 @@ def consolidate_dhis2_and_naomi_data(
         coc=coc,
         fp_ressources=fp_ressources,
     )
-    df_ptme, workbook = filter_consistent_data_by_rules(
+    dico_ptme = filter_consistent_data_by_rules(
         df_data=df_ptme,
         organisation_units=organisation_units,
         include_inconsistent_data=include_inconsistent_data,
@@ -185,6 +188,7 @@ def consolidate_dhis2_and_naomi_data(
         workbook=workbook,
         pathologie="PTME",
     )
+    df_ptme, workbook = dico_ptme["data"], dico_ptme["workbook"]
 
     df_cons = extract_dhis2_consultant_data(
         dhis2=dhis2,
@@ -343,7 +347,7 @@ def consolidate_dhis2_and_naomi_data(
     return df_final
 
 
-@update_pnls_report.task
+# @update_pnls_report.task
 def generate_extraction_periods(
     year: int,
     trimestres: list[str],
@@ -374,7 +378,7 @@ def generate_extraction_periods(
     return periods_list
 
 
-@update_pnls_report.task
+# @update_pnls_report.task
 def run_notebook_update_pnls_report(
     df: pl.DataFrame, fp_historical_data: str, annee_extraction: int
 ) -> None:

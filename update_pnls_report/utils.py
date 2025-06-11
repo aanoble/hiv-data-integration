@@ -954,11 +954,14 @@ def filter_consistent_data_by_rules(
             src_ws.cell(row=start, column=column, value=value)
 
     df_filtered = df_data_rules[df_data_rules[columns_to_check].isna().all(axis=1)]
-    return df_data.join(
-        pl.DataFrame(df_filtered).select(["organisation_unit_id", "period"]),
-        on=["organisation_unit_id", "period"],
-        how="inner",
-    ), workbook
+    return {
+        "data": df_data.join(
+            pl.DataFrame(df_filtered).select(["organisation_unit_id", "period"]),
+            on=["organisation_unit_id", "period"],
+            how="inner",
+        ),
+        "workbook": workbook,
+    }
 
 
 def extract_dhis2_pec_aggregated_data(
