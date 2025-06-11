@@ -118,7 +118,11 @@ def consolidate_dhis2_and_naomi_data(
     Returns:
         A Polars DataFrame containing the fetched data.
     """
-    df_naomi = extract_naomi_api_data(year=annee_extraction, fp_ressources=fp_ressources)
+    # df_naomi = extract_naomi_api_data(year=annee_extraction, fp_ressources=fp_ressources)
+
+    df_naomi = pl.read_parquet(
+        Path(workspace.files_path, f"data/données spectrum/naomi_data_{annee_extraction}.parquet")
+    )
 
     coc = pl.DataFrame(dhis2.meta.category_option_combos())
     organisation_units = pl.DataFrame(dhis2.meta.organisation_units())
