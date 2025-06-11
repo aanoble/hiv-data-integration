@@ -3,7 +3,7 @@ name: Push update-pnls-report pipeline to OpenHEXA Workspace
 on:
   push:
     paths:
-      - ".github/workflows/push-update-pnls-report.yml"
+      - ".github/workflows/push_update_pnls_report.yml"
       - "update_pnls_report/**"
       - "!update_pnls_report/docs/**"
       - "!update_pnls_report/docs/README.md"

@@ -903,12 +903,8 @@ def filter_consistent_data_by_rules(
     Returns:
         A tuple containing a Polars DataFrame with consistent data and the updated workbook.
     """
-    if include_inconsistent_data:
-        return df_data
-
     current_run.log_info(
-        f"🛠️ Filtre et exportation des données incohérentes à partir de la matrice de cohérence "
-        f"des données pour la pathologie `{pathologie}`..."
+        f"Consolidation de la matrice de cohérence des données pour la pathologie `{pathologie}`..."
     )
     df_data_rules = df_data.to_pandas().copy()
 
@@ -954,12 +950,19 @@ def filter_consistent_data_by_rules(
             src_ws.cell(row=start, column=column, value=value)
 
     df_filtered = df_data_rules[df_data_rules[columns_to_check].isna().all(axis=1)]
-    return {
-        "data": df_data.join(
+
+    if not include_inconsistent_data:
+        current_run.log_info(
+            f"🛠️ Filtre des données incohérentes à partir de la matrice de cohérence "
+            f"des données pour la pathologie `{pathologie}`..."
+        )
+        df_data = df_data.join(
             pl.DataFrame(df_filtered).select(["organisation_unit_id", "period"]),
             on=["organisation_unit_id", "period"],
             how="inner",
-        ),
+        )
+    return {
+        "data": df_data,
         "workbook": workbook,
     }
 
