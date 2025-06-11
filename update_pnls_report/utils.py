@@ -827,9 +827,10 @@ def fetch_dhis2_indicators(
     """
     start, end = periods_list[0], periods_list[-1]
     month_range = periods.Month.from_string(start).range(periods.Month.from_string(end))
+    periods_range = [month.period for month in month_range]
     results = dhis2.analytics.get(
         indicators=indicators_uid,
-        periods=[month.period for month in month_range],
+        periods=periods_range,
         org_unit_levels=[4],
         include_cocs=False,
     )
@@ -971,10 +972,11 @@ def extract_dhis2_pec_aggregated_data(
     for period_suffix in valid_suffixes:
         start, end = periods_map[period_suffix]
         month_range = periods.Month.from_string(start).range(periods.Month.from_string(end))
+        periods_range = [month.period for month in month_range]
         for de in data_elements:
             try:
                 data = dhis2.analytics.get(
-                    periods=[month.period for month in month_range],
+                    periods=periods_range,
                     data_elements=[de],
                     org_units=ou_ids,
                 )
