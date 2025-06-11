@@ -825,45 +825,11 @@ def fetch_dhis2_indicators(
     Returns:
         A Polars DataFrame containing the fetched indicators.
     """
-    # def fetch_indicator(indicator: str) -> pl.DataFrame | None:
-    #     """Fetch a specific indicator from DHIS2 for the given periods.
-
-    #     Args:
-    #         indicator: The UID of the indicator to fetch.
-
-    #     Returns:
-    #         A Polars DataFrame containing the fetched indicator data, or None if an error occurs.
-    #     """
-    #     try:
-    #         return dhis2.analytics.get(
-    #             indicators=[indicator],
-    #             periods=periods.get_range(start=periods_list[0], end=periods_list[-1]),
-    #             org_unit_levels=[4],
-    #             include_cocs=False,
-    #         )
-    #     except Exception:
-    #         try:
-    #             time.sleep(5)
-    #             return dhis2.analytics.get(
-    #                 indicators=[indicator],
-    #                 periods=periods.get_range(start=periods_list[0], end=periods_list[-1]),
-    #                 org_unit_levels=[4],
-    #                 include_cocs=False,
-    #             )
-    #         except Exception as e:
-    #             current_run.log_critical(
-    #                 "Erreur survenue lors de la récupération des données de "
-    #                 f"l'indicateur {indicator}: {e!s}"
-    #             )
-    #             return None
-
-    # with ThreadPoolExecutor(max_workers=5) as executor:
-    #     futures = [executor.submit(fetch_indicator, ind) for ind in indicators_uid]
-    #     results = [future.result() for future in futures if future.result() is not None]
-
+    start, end = periods_list[0], periods_list[-1]
+    month_range = periods.Month.from_string(start).range(periods.Month.from_string(end))
     results = dhis2.analytics.get(
         indicators=indicators_uid,
-        periods=periods.get_range(start=periods_list[0], end=periods_list[-1]),
+        periods=[month.period for month in month_range],
         org_unit_levels=[4],
         include_cocs=False,
     )
@@ -981,7 +947,7 @@ def extract_dhis2_pec_aggregated_data(
     Returns:
         pl.DataFrame: A Polars DataFrame containing the processed data for indicators 11, 14.
     """
-    if not any(p.endswith(("06", "12")) for p in periods_list):
+    if not any(p.endswith(("03", "06", "09", "12")) for p in periods_list):
         return pl.DataFrame()
 
     current_run.log_info(
@@ -989,27 +955,37 @@ def extract_dhis2_pec_aggregated_data(
     )
 
     df_ind = pl.DataFrame()
-    year = periods_list[0][:4]
-    periods_map = {"06": f"{year}S1", "12": f"{year}S2"}
+    year = int(periods_list[0][:4])
+    periods_map = {
+        "03": (f"{year - 1}10", f"{year}03"),
+        "06": (f"{year}01", f"{year}06"),
+        "09": (f"{year}04", f"{year}09"),
+        "12": (f"{year}07", f"{year}12"),
+    }
     data_elements = ["zxMJc6KPesz", "ykXAaZFC1bt"]
     collected_data = []
+    valid_suffixes = {
+        s for s in ("03", "06", "09", "12") if any(p.endswith(s) for p in periods_list)
+    }
 
-    for period_suffix, six_month in periods_map.items():
-        if any(p.endswith(period_suffix) for p in periods_list):
-            for de in data_elements:
-                try:
-                    data = dhis2.analytics.get(
-                        periods=[periods.SixMonth(six_month)],
-                        data_elements=[de],
-                        org_units=ou_ids,
-                    )
-                    df = pl.DataFrame(data).select(["dx", "co", "ou", "pe", "value"])
-                    collected_data.append(df)
-                except Exception as e:
-                    current_run.log_critical(
-                        f"Erreur survenue lors de la récupération des données de  `{de}`: {e!s}"
-                    )
-                    continue
+    for period_suffix in valid_suffixes:
+        start, end = periods_map[period_suffix]
+        month_range = periods.Month.from_string(start).range(periods.Month.from_string(end))
+        for de in data_elements:
+            try:
+                data = dhis2.analytics.get(
+                    periods=[month.period for month in month_range],
+                    data_elements=[de],
+                    org_units=ou_ids,
+                )
+                df = pl.DataFrame(data).select(["dx", "co", "ou", "pe", "value"])
+                collected_data.append(df)
+
+            except Exception as e:
+                current_run.log_critical(
+                    f"Erreur survenue lors de la récupération des données de  `{de}`: {e!s}"
+                )
+                continue
 
     if not collected_data:
         return pl.DataFrame()
@@ -1276,8 +1252,8 @@ def export_file(df: pl.DataFrame, fp_historical_data: str, annee_extraction: int
     dst_dir.mkdir(parents=True, exist_ok=True)
 
     for period in df.select("periode").sort("periode").unique().to_series().to_list():
-        file_name = f"{period}.parquet"
-        df.filter(pl.col("periode") == period).write_parquet(dst_dir / file_name)
+        file_name = f"{period}.csv"
+        df.filter(pl.col("periode") == period).write_csv(dst_dir / file_name)
         current_run.add_file_output((dst_dir / file_name).as_posix())
 
     current_run.log_info(

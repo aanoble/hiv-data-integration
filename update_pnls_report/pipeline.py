@@ -403,29 +403,5 @@ def run_notebook_update_pnls_report(
     current_run.log_info("✅ Le pipeline a été exécuté avec succès. ✅")
 
 
-# @update_pnls_report.task
-# def export_file(df: pl.DataFrame, fp_historical_data: str, annee_extraction: int):
-#     """Export the DataFrame to a Parquet file.
-
-#     Args:
-#         df: The DataFrame to export.
-#         fp_historical_data: The path to the historical data directory.
-#         annee_extraction: The year of data extraction.
-#     """
-#     dst_dir = Path(workspace.files_path) / f"{fp_historical_data}/{annee_extraction}_OH"
-#     dst_dir.mkdir(parents=True, exist_ok=True)
-
-#     for period in df.select("periode").sort("periode").unique().to_series().to_list():
-#         file_name = f"{period}.parquet"
-#         df.filter(pl.col("periode") == period).write_parquet(dst_dir / file_name)
-#         current_run.add_file_output((dst_dir / file_name).as_posix())
-
-#     current_run.log_info(
-#     "Le fichier de données consolidées a été exporté avec succès dans "
-#     f"le repertoire `{dst_dir.as_posix()}`"
-# )
-# current_run.log_info("✅ Le pipeline a été exécuté avec succès. ✅")
-
-
 if __name__ == "__main__":
     update_pnls_report()
