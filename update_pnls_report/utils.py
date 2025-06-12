@@ -973,21 +973,17 @@ def extract_dhis2_pec_aggregated_data(
         start, end = periods_map[period_suffix]
         month_range = periods.Month.from_string(start).range(periods.Month.from_string(end))
         periods_range = [month.period for month in month_range]
-        for de in data_elements:
-            try:
-                data = dhis2.analytics.get(
-                    periods=periods_range,
-                    data_elements=[de],
-                    org_units=ou_ids,
-                )
-                df = pl.DataFrame(data).select(["dx", "co", "ou", "pe", "value"])
-                collected_data.append(df)
-
-            except Exception as e:
-                current_run.log_critical(
-                    f"Erreur survenue lors de la récupération des données de  `{de}`: {e!s}"
-                )
-                continue
+        data = dhis2.analytics.get(
+            periods=periods_range,
+            data_elements=data_elements,
+            org_units=ou_ids,
+        )
+        df = (
+            pl.DataFrame(data)
+            .with_columns(pl.lit(f"{year}{period_suffix}").alias("period"))
+            .select(["dx", "co", "ou", "period", "value"])
+        )
+        collected_data.append(df)
 
     if not collected_data:
         return pl.DataFrame()
@@ -999,7 +995,6 @@ def extract_dhis2_pec_aggregated_data(
                 "dx": "column",
                 "co": "category_option_combo_id",
                 "ou": "organisation_unit_id",
-                "pe": "period",
             }
         )
         .join(coc, left_on="category_option_combo_id", right_on="id", how="left")
@@ -1025,16 +1020,19 @@ def extract_dhis2_pec_aggregated_data(
                 return_dtype=pl.String,
             ),
         )
-        .with_columns((pl.col("column_indicator") + "_" + pl.col("coc_name")).alias("column_name"))
+        .with_columns(
+            (pl.col("column_indicator") + "_" + pl.col("coc_name")).alias("column_name"),
+            pl.col("value").cast(pl.Float64),
+        )
         .pivot(
             index=["organisation_unit_id", "period"],
             columns=["column_name"],
+            aggregate_function="sum",
             values="value",
         )
+        .rename(lambda x: x.replace(" ", ""))
     )
-    df_ind = df_ind.rename(lambda x: x.replace(" ", "")).with_columns(
-        pl.col("period").replace({f"{year}S1": f"{year}06", f"{year}S2": f"{year}12"})
-    )
+
     df_ind = df_ind.with_columns(
         [
             pl.col(c).cast(pl.Float64)
@@ -1043,11 +1041,10 @@ def extract_dhis2_pec_aggregated_data(
         ]
     )
     df_ind = (
-        df_ind.group_by(["organisation_unit_id", "period"])  # .fill_null(0)
+        df_ind.group_by(["organisation_unit_id", "period"])
         .agg(
             [
                 pl.when(pl.col(col).is_not_null().any()).then(pl.col(col).sum()).otherwise(None)
-                # pl.sum(col)
                 for col in df_ind.columns
                 if col not in ["organisation_unit_id", "period"]
             ]
