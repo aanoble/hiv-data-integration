@@ -1,0 +1,37 @@
+name: Push update-pnls-report pipeline to OpenHEXA Workspace
+
+on:
+  push:
+    paths:
+      - ".github/workflows/push_update_pnls_report_with_spectrum_path.yml"
+      - "update_pnls_report_with_spectrum_path/**"
+      - "!update_pnls_report_with_spectrum_path/docs/**"
+      - "!update_pnls_report_with_spectrum_path/docs/README.md"
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - uses: actions/setup-python@v2
+        with:
+          python-version: '3.11'
+      
+      - name: Configure OpenHEXA CLI
+        uses: blsq/openhexa-cli-action@v1
+        with:
+          workspace:  "civ-cdc-unaids-hiv-data-e09960"
+          token: ${{ secrets.OH_TOKEN }}
+          
+      - name: Push pipeline to OpenHEXA
+        run: |
+          openhexa pipelines push update_pnls_report_with_spectrum_path \
+            --code "update-pnls-report-with-spectrum-path" \
+            --description "${{ github.event.head_commit.message }}" \
+            --link "https://github.com/aanoble/hiv-data-integration/commit/${{ github.sha }}" \
+            --yes
