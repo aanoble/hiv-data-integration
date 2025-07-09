@@ -1,10 +1,10 @@
 """Template for newly generated pipelines."""
 
+from datetime import datetime
 from pathlib import Path
 
 import openpyxl as pyxl
-
-# import papermill as pm
+import papermill as pm
 import polars as pl
 from constants import (
     DICO_RULES_IST,
@@ -391,15 +391,20 @@ def run_notebook_update_pnls_report(
     """
     export_file(df, fp_historical_data=fp_historical_data, annee_extraction=annee_extraction)
 
-    # current_run.log_info(
-    #     "Exécution du notebook de rafraîchissement des données du rapport PVVIH pédiatrique."
-    # )
-    # input_path = Path(workspace.files_path, "pipeline_automation/main_program.ipynb")
-    # output_path = Path(workspace.files_path, "pipeline_automation/output_main_program.ipynb")
-    # pm.execute_notebook(
-    #     input_path=input_path.as_posix(),
-    #     output_path=output_path.as_posix(),
-    # )
+    current_run.log_info(
+        "Exécution du notebook de rafraîchissement des données du rapport PVVIH pédiatrique."
+    )
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+    input_path = Path(workspace.files_path, "pipeline_automation/main_program.ipynb")
+    output_path = Path(
+        workspace.files_path, f"pipeline_automation/execution/output_main_program_{timestamp}.ipynb"
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    pm.execute_notebook(
+        input_path=input_path.as_posix(),
+        output_path=output_path.as_posix(),
+    )
     current_run.log_info("✅ Le pipeline a été exécuté avec succès. ✅")
 
 
