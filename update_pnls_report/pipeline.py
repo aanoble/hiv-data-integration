@@ -280,7 +280,6 @@ def consolidate_dhis2_and_naomi_data(
                     (
                         "indicateur_31",
                         "indicateur_12",
-                        "indicateur_17",
                     )
                 )
             ]
