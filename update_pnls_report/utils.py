@@ -1,761 +1,23 @@
 import contextlib
 import functools
-import json
-
-# import operator
 import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import openpyxl as pyxl
-
-# import papermill as pm
 import polars as pl
-import requests
 from constants import (
     COLUMN_NAME_GROUP_AGE,
-    DICO_COLUMNS,
-    DICO_EXPECTED_COLUMNS,
     MAP_AGE_GROUP,
 )
+from fuzzywuzzy import fuzz, process
 from openhexa.sdk import current_run, workspace
 from openhexa.toolbox.dhis2 import DHIS2, dataframe, periods
 from openpyxl.utils.dataframe import dataframe_to_rows
-
-
-def extract_naomi_api_data(
-    year: int,
-    fp_ressources: str,
-    base_url: str | None = None,
-    indicators_mapping: dict[str, str] | None = None,
-    sex_mapping: dict[str, str] | None = None,
-    age_mapping: dict[str, str] | None = None,
-    max_workers: int = 5,
-) -> pl.DataFrame:
-    """Récupère les données Naomi de l'API et les combine dans un DataFrame optimisé.
-
-    Args:
-        year: Année de référence
-        fp_ressources: Chemin d'accès aux fichiers ressources
-        base_url: URL template avec placeholders {indicator}, {age_group}, {year}, {sex}
-        indicators_mapping: Dictionnnaire de mapping des indicateurs à récupérer
-        sex_mapping: Dictionnaire de mapping des sexes
-        age_mapping: Dictionnaire de mapping des groupes d'âge
-        max_workers: Nombre de requêtes parallèles
-
-    Returns:
-        DataFrame Polars avec les données consolidées
-    """
-    base_url = (
-        "https://naomiviewerserver.azurewebsites.net/api/v1/areas?country=CIV&indicator={indicator}&ageGroup={age_group}&period={year}-4&sex={sex}&areaLevel=2"
-        if base_url is None
-        else base_url
-    )
-
-    indicators_mapping = (
-        {
-            "aware_plhiv_num": "indicateur_9",
-            "plhiv": "indicateur_10",
-        }
-        if indicators_mapping is None
-        else indicators_mapping
-    )
-    sex_mapping = {"male": "M", "female": "F"} if sex_mapping is None else sex_mapping
-    age_mapping = (
-        {
-            "age_0_4_ans": "Y000_004",
-            "age_05_09_ans": "Y005_009",
-            "age_10_14_ans": "Y010_014",
-            "age_15_19_ans": "Y015_019",
-            "age_20_24_ans": "Y020_024",
-            "age_25_49_ans": "Y025_049",
-            "age_50_ans_et_plus": "Y050_999",
-        }
-        if age_mapping is None
-        else age_mapping
-    )
-    current_run.log_info(f"⏳ Extraction des données NAOMI pour l'année `{year}`...")
-    params = [
-        (ind, sex, age, age_code)
-        for ind in indicators_mapping
-        for sex in sex_mapping
-        for age, age_code in age_mapping.items()
-    ]
-
-    def process_request(ind: str, sex: str, age: str, age_code: str) -> pl.DataFrame | None:
-        try:
-            url = base_url.format(indicator=ind, age_group=age_code, year=year, sex=sex)
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-
-            data = response.json()
-            if not data or not data[0].get("subareas"):
-                return None
-
-            subareas = [row["subareas"] for row in data[0]["subareas"]]
-            flat_data = [item for sublist in subareas for item in sublist]
-
-            return pl.DataFrame(flat_data).with_columns(
-                pl.lit(f"{sex_mapping[sex]}_{age}").alias("coc_name"),
-                pl.lit(indicators_mapping[ind]).alias("indicator"),
-            )
-
-        except Exception as e:
-            current_run.log_error(f"Error fetching {ind}|{sex}|{age}: {e!s}")
-            return None
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(functools.partial(process_request, *p)) for p in params]
-        results = [f.result() for f in futures if f.result() is not None]
-
-    df_naomi = (
-        (
-            pl.concat(results, how="diagonal_relaxed")
-            .with_columns(
-                pl.col("name").str.to_uppercase().alias("name"),
-                pl.lit(f"{year}12").alias("period"),
-                (pl.col("indicator") + "_" + pl.col("coc_name")).alias("column_name"),
-            )
-            .pivot(
-                index=["code", "name", "period"],
-                columns=["column_name"],
-                values="mean",
-            )
-        )
-        if results
-        else pl.DataFrame()
-    )
-
-    if df_naomi.is_empty():
-        current_run.log_error(
-            f"Aucune donnée retrouvée depuis NAOMI pour l'année `{year}`, "
-            "il se peut qu'elle soit en cours de validation."
-        )
-        raise ValueError("No data fetched from NAOMI API.")
-
-    fp_path = Path(workspace.files_path) / f"{fp_ressources}/district_mapping_naomi_dhis2.json"
-    if not fp_path.exists():
-        current_run.log_error(
-            f"Le fichier de mapping des districts NAOMI & DHIS2 `{fp_path}` n'existe pas."
-        )
-        raise FileNotFoundError(f"File {fp_path} does not exist.")
-
-    current_run.log_info(
-        f"✅ Extraction des données de NAOMI pour l'année `{year}` terminée avec succès."
-    )
-
-    return (
-        df_naomi.join(
-            pl.DataFrame(
-                data=list(json.load(Path.open(fp_path.as_posix(), "r", encoding="utf-8")).items()),
-                schema=["code", "organisation_unit_id"],
-                orient="row",
-            ),
-            how="left",
-            on="code",
-        )
-        .select(
-            ["code", "organisation_unit_id", "period"]
-            + [pl.exclude(["code", "organisation_unit_id", "period", "name"])]
-        )
-        .with_columns(pl.col(pl.NUMERIC_DTYPES).round(0).cast(pl.Int64))
-    )
-
-
-def extract_dhis2_ist_data(
-    dhis2: DHIS2,
-    periods_list: list[str],
-    ou_ids: list[str],
-    coc: pl.DataFrame,
-    fp_ressources: str,
-) -> pl.DataFrame:
-    """Fetch and process DHIS2 data for IST CD pathologies.
-
-    Args:
-        dhis2: DHIS2 connection object.
-        periods_list: List of periods to fetch data for.
-        ou_ids: List of organization unit IDs.
-        coc: DataFrame containing category option combos.
-        fp_ressources: Path to resource files.
-
-    Returns:
-        A Polars DataFrame containing processed DHIS2 data for IST CD pathologies.
-    """
-    fp_data_element = Path(workspace.files_path) / f"{fp_ressources}/data_element_ist.parquet"
-    if not fp_data_element.exists():
-        msg_error = (
-            f"Le fichier des éléments de données de la pathologie IST CD `{fp_data_element}` "
-            "n'existe pas."
-        )
-        current_run.log_error(msg_error)
-        raise FileNotFoundError(f"File {fp_data_element} does not exist.")
-
-    df_data_element_ist = pl.read_parquet(fp_data_element.as_posix())
-
-    de_ist = (
-        df_data_element_ist.filter(pl.col("type") == "data_element")
-        .select("id")
-        .unique()
-        .to_series()
-        .to_list()
-    )
-    current_run.log_info(
-        "Extraction des données DHIS2 des différentes pathologies "
-        f"aux périodes suivantes : {', '.join(periods_list)}."
-    )
-    current_run.log_info("⏳ Extraction et traitements des données pour la pathologie `IST CD`...")
-
-    df_ist = dataframe.extract_analytics(
-        dhis2,
-        periods=periods_list,
-        data_elements=de_ist,
-        org_units=ou_ids,
-        org_unit_levels=[4],
-    )
-    # fetch_dhis2_data(
-    #     dhis2=dhis2,
-    #     periods_list=periods_list,
-    #     ou_ids=ou_ids,
-    #     data_elements_uid=de_ist,
-    # )
-    df_ist = (
-        df_ist.join(coc, left_on="category_option_combo_id", right_on="id", how="left").rename(
-            {"name": "coc_name"}
-        )
-        # .drop("attribute_option_combo_id")
-    )
-    df_ist = (
-        df_ist.join(
-            df_data_element_ist.with_columns(
-                pl.col("column")
-                .map_elements(lambda s: DICO_COLUMNS["IST"][s], return_dtype=pl.String)
-                .alias("column_indicator")
-            ).select(["id", "column_indicator"]),
-            left_on="data_element_id",
-            right_on="id",
-            how="left",
-        )
-        .with_columns(
-            pl.col("coc_name")
-            .map_elements(
-                lambda x: (
-                    multi_replace(x).replace("Féminin", "").strip().strip(",") + "_F"
-                    if "Féminin" in x
-                    else multi_replace(x).replace("Masculin", "").strip().strip(",") + "_M"
-                    if "Masculin" in x
-                    else multi_replace(x)
-                ),
-                return_dtype=pl.String,
-            )
-            .alias("coc_name")
-        )
-        .with_columns((pl.col("column_indicator") + "_" + pl.col("coc_name")).alias("column_name"))
-        .pivot(
-            index=["organisation_unit_id", "period"],
-            columns=["column_name"],
-            values="value",
-        )
-    )
-    df_ist = df_ist.rename(lambda x: x.replace(" ", ""))
-    df_ist_ind = fetch_dhis2_indicators(
-        dhis2=dhis2,
-        periods_list=periods_list,
-        indicators_uid=[
-            "r8NxcXBxRlw",
-            "jm1J88Ye2dJ",
-            "HW8DCBLBL2H",
-            "euQzrRXmR0X",
-            "eTUDNIwZKMm",
-            "fTogxCAg65D",
-            "ee7RhWGrsa4",
-            "pIf1CmuVeQF",
-            "rKGxxPDJ9Rz",
-            "JubvGJM4hly",
-        ],
-    )
-    df_ist_ind = (
-        df_ist_ind.with_columns(
-            pl.lit("indicateur_7").alias("column_indicator"),
-            pl.col("dx_name")
-            .map_elements(process_column, return_dtype=pl.String)
-            .alias("coc_name"),
-        )
-        .with_columns((pl.col("column_indicator") + "_" + pl.col("coc_name")).alias("column_name"))
-        .rename({"dx": "data_element_id", "ou": "organisation_unit_id", "pe": "period"})
-        .pivot(
-            index=["organisation_unit_id", "period"],
-            columns=["column_name"],
-            values="value",
-        )
-    )
-    df_concat = pl.concat([df_ist, df_ist_ind], how="diagonal_relaxed")
-
-    df_concat = df_concat.with_columns(
-        [
-            pl.col(c).cast(pl.Float64)
-            for c in df_concat.columns
-            if c not in ["organisation_unit_id", "period"]
-        ]
-    )
-
-    df_concat = (
-        df_concat.group_by(["organisation_unit_id", "period"])  # .fill_null(0)
-        .agg(
-            [
-                pl.when(pl.col(col).is_not_null().any()).then(pl.col(col).sum()).otherwise(None)
-                # pl.sum(col)
-                for col in df_concat.columns
-                if col not in ["organisation_unit_id", "period"]
-            ]
-        )
-        .sort(["organisation_unit_id", "period"])
-    )
-
-    df_concat = df_concat.with_columns(
-        [
-            pl.lit(None).alias(col)
-            for col in DICO_EXPECTED_COLUMNS["IST"]
-            if col not in df_concat.columns
-        ]
-    )
-    current_run.log_info(
-        "✅ Extraction des données pour la pathologie `IST CD` effectuée avec succès."
-    )
-    return df_concat.select(
-        ["organisation_unit_id", "period"]
-        + [col for col in DICO_EXPECTED_COLUMNS["IST"] if col in df_concat.columns]
-    ).with_columns(pl.col(pl.NUMERIC_DTYPES).round(0).cast(pl.Int64))
-
-
-def extract_dhis2_pec_data(
-    dhis2: DHIS2,
-    periods_list: list[str],
-    ou_ids: list[str],
-    coc: pl.DataFrame,
-    fp_ressources: str,
-) -> pl.DataFrame:
-    """Fetch and process DHIS2 data for PEC pathologies.
-
-    Args:
-        dhis2: DHIS2 connection object.
-        periods_list: List of periods to fetch data for.
-        ou_ids: List of organization unit IDs.
-        coc: DataFrame containing category option combos.
-        fp_ressources: Path to resource files.
-
-    Returns:
-        A Polars DataFrame containing processed DHIS2 data for PEC pathologies.
-    """
-    fp_data_element = Path(workspace.files_path) / f"{fp_ressources}/data_element_pec.parquet"
-    if not fp_data_element.exists():
-        msg_error = (
-            f"Le fichier des éléments de données de la pathologie PEC `{fp_data_element}` "
-            "n'existe pas."
-        )
-        current_run.log_error(msg_error)
-        raise FileNotFoundError(f"File {fp_data_element} does not exist.")
-    df_data_element_pec = pl.read_parquet(fp_data_element.as_posix())
-    de_pec = (
-        df_data_element_pec.filter(pl.col("type") == "data_element")
-        .select("id")
-        .unique()
-        .to_series()
-        .to_list()
-    )
-    current_run.log_info("⏳ Extraction et traitement des données pour la pathologie `PEC`...")
-    df_pec = dataframe.extract_analytics(
-        dhis2,
-        periods=periods_list,
-        data_elements=de_pec,
-        org_units=ou_ids,
-        org_unit_levels=[4],
-    )
-
-    # fetch_dhis2_data(
-    #     dhis2=dhis2,
-    #     periods_list=periods_list,
-    #     ou_ids=ou_ids,
-    #     data_elements_uid=de_pec,
-    # )
-    df_pec = (
-        df_pec.join(coc, left_on="category_option_combo_id", right_on="id", how="left").rename(
-            {"name": "coc_name"}
-        )
-        # .drop("attribute_option_combo_id")
-    )
-
-    df_pec = (
-        df_pec.join(
-            df_data_element_pec.with_columns(
-                pl.col("column")
-                .map_elements(lambda s: DICO_COLUMNS["PEC"][s], return_dtype=pl.String)
-                .alias("column_indicator")
-            ).select(["id", "column_indicator"]),
-            left_on="data_element_id",
-            right_on="id",
-            how="left",
-        )
-        .with_columns(
-            pl.col("coc_name")
-            .map_elements(
-                lambda x: (
-                    multi_replace(x).replace("Féminin", "").strip().strip(",") + "_F"
-                    if "Féminin" in x
-                    else multi_replace(x).replace("Masculin", "").strip().strip(",") + "_M"
-                    if "Masculin" in x
-                    else multi_replace(x)
-                ),
-                return_dtype=pl.String,
-            )
-            .alias("coc_name")
-        )
-        .with_columns((pl.col("column_indicator") + "_" + pl.col("coc_name")).alias("column_name"))
-        .pivot(
-            index=["organisation_unit_id", "period"],
-            columns=["column_name"],
-            values="value",
-        )
-    )
-    df_pec = df_pec.rename(lambda x: x.replace(" ", ""))
-
-    df_pec_ind = fetch_dhis2_indicators(
-        dhis2=dhis2,
-        periods_list=periods_list,
-        indicators_uid=[
-            "bZ113eh6zgZ",
-            "xYrmHNcrCMK",
-            "etFvcc6ABmx",
-            "Y99o4wHv1zr",
-            "t90eO6Qo5An",
-            "rymKnAHRp45",
-            "gqn8Ybqla8m",
-            "f9rSMi5o1j4",
-            "xP7UNxEE9Lc",
-            "pmi6fk6MR9s",
-            "jb6GKFZffJ7",
-            "ZBoNPLk8hL6",
-            "F23qEOERvP0",
-            "bzEdlzRfDOV",
-        ],
-    )
-    df_pec_ind = (
-        df_pec_ind.with_columns(
-            pl.lit("indicateur_4").alias("column_indicator"),
-            pl.col("dx_name")
-            .map_elements(process_column, return_dtype=pl.String)
-            .alias("coc_name"),
-        )
-        .with_columns((pl.col("column_indicator") + "_" + pl.col("coc_name")).alias("column_name"))
-        .rename({"dx": "data_element_id", "ou": "organisation_unit_id", "pe": "period"})
-        .pivot(
-            index=["organisation_unit_id", "period"],
-            columns=["column_name"],
-            values="value",
-        )
-    )
-    df_concat = pl.concat([df_pec, df_pec_ind], how="diagonal_relaxed")
-
-    df_concat = df_concat.with_columns(
-        [
-            pl.col(c).cast(pl.Float64)
-            for c in df_concat.columns
-            if c not in ["organisation_unit_id", "period"]
-        ]
-    )
-
-    df_concat = (
-        df_concat.group_by(["organisation_unit_id", "period"])  # .fill_null(0)
-        .agg(
-            [
-                pl.when(pl.col(col).is_not_null().any()).then(pl.col(col).sum()).otherwise(None)
-                # pl.sum(col)
-                for col in df_concat.columns
-                if col not in ["organisation_unit_id", "period"]
-            ]
-        )
-        .sort(["organisation_unit_id", "period"])
-    )
-
-    df_concat = df_concat.with_columns(
-        [
-            pl.lit(None).alias(col)
-            for col in DICO_EXPECTED_COLUMNS["PEC"]
-            if col not in df_concat.columns
-        ]
-    )
-    current_run.log_info(
-        "✅ Extraction des données pour la pathologie `PEC` effectuée avec succès."
-    )
-    return df_concat.select(
-        ["organisation_unit_id", "period"]
-        + [col for col in DICO_EXPECTED_COLUMNS["PEC"] if col in df_concat.columns]
-    ).with_columns(pl.col(pl.NUMERIC_DTYPES).round(0).cast(pl.Int64))
-
-
-def extract_dhis2_ptme_data(
-    dhis2: DHIS2,
-    periods_list: list[str],
-    ou_ids: list[str],
-    coc: pl.DataFrame,
-    fp_ressources: str,
-) -> pl.DataFrame:
-    """Fetch and process DHIS2 data for PTME pathologies.
-
-    Args:
-        dhis2: DHIS2 connection object.
-        periods_list: List of periods to fetch data for.
-        ou_ids: List of organization unit IDs.
-        coc: DataFrame containing category option combos.
-        fp_ressources: Path to resource files.
-        df_pec: DataFrame containing PEC data.
-
-    Returns:
-        A Polars DataFrame containing processed DHIS2 data for PTME pathologies.
-    """
-    fp_data_element = Path(workspace.files_path) / f"{fp_ressources}/data_element_ptme.parquet"
-    if not fp_data_element.exists():
-        msg_error = (
-            f"Le fichier des éléments de données de la pathologie PTME `{fp_data_element}` "
-            "n'existe pas."
-        )
-        current_run.log_error(msg_error)
-        raise FileNotFoundError(f"File {fp_data_element} does not exist.")
-    df_data_element_ptme = pl.read_parquet(fp_data_element.as_posix())
-    de_ptme = (
-        df_data_element_ptme.filter(pl.col("type") == "data_element")
-        .select("id")
-        .unique()
-        .to_series()
-        .to_list()
-    )
-
-    de_ptme = np.unique([col.split(".")[0] for col in de_ptme]).tolist()
-    current_run.log_info("⏳ Extraction et traitement des données pour la pathologie `PTME`...")
-    df_ptme = dataframe.extract_analytics(
-        dhis2,
-        periods=periods_list,
-        data_elements=de_ptme,
-        org_units=ou_ids,
-        org_unit_levels=[4],
-    )
-    # fetch_dhis2_data(
-    #     dhis2=dhis2,
-    #     periods_list=periods_list,
-    #     ou_ids=ou_ids,
-    #     data_elements_uid=de_ptme,
-    # )
-    df_ptme = (
-        df_ptme.join(coc, left_on="category_option_combo_id", right_on="id", how="left").rename(
-            {"name": "coc_name"}
-        )
-        # .drop("attribute_option_combo_id")
-    )
-
-    df_ptme = (
-        df_ptme.with_columns(
-            pl.when(
-                (pl.col("category_option_combo_id") != "HllvX50cXC0")
-                & (
-                    ~pl.col("data_element_id").is_in(
-                        ["zeh89uTtSwj", "kHvgHJBM73m", "kHvgHJBM73m", "OgikEnCNaTS"]
-                    )
-                )
-            )
-            .then(pl.col("data_element_id") + "." + pl.col("category_option_combo_id"))
-            .otherwise(pl.col("data_element_id"))
-            .alias("data_element_id_new")
-        )
-        .join(
-            df_data_element_ptme.with_columns(
-                pl.col("column")
-                .map_elements(lambda s: DICO_COLUMNS["PTME"][s], return_dtype=pl.String)
-                .alias("column_indicator")
-            ).select(["id", "column_indicator"]),
-            left_on="data_element_id_new",
-            right_on="id",
-            how="left",
-        )
-        .with_columns(
-            pl.col("coc_name")
-            .map_elements(
-                lambda x: (
-                    multi_replace(x).replace("Féminin", "").strip().strip(",") + "_F"
-                    if "Féminin" in x
-                    else multi_replace(x).replace("Masculin", "").strip().strip(",") + "_M"
-                    if "Masculin" in x
-                    else multi_replace(x)
-                ),
-                return_dtype=pl.String,
-            )
-            .alias("coc_name")
-        )
-        .with_columns(
-            pl.col("value").cast(pl.Float64),
-            (pl.col("column_indicator")).alias("column_name"),
-        )
-        .pivot(
-            index=["organisation_unit_id", "period"],
-            columns=["column_name"],
-            values="value",
-        )
-    )
-    df_ptme = df_ptme.rename(lambda x: x.replace(" ", ""))
-    df_ptme_ind = fetch_dhis2_indicators(
-        dhis2=dhis2,
-        periods_list=periods_list,
-        indicators_uid=(
-            df_data_element_ptme.filter(pl.col("type") == "indicator")
-            .select("id")
-            .unique()
-            .to_series()
-            .to_list()
-        ),
-    )
-
-    df_ptme_ind = (
-        df_ptme_ind.with_columns(
-            pl.col("dx")
-            .map_elements(
-                {
-                    "mfDEvkT3f6g": "indicateur_3",
-                    "B4rn1KsphYr": "indicateur_18",
-                    "pruTz6nW3Pg": "indicateur_23",
-                }.get,
-                return_dtype=pl.String,
-            )
-            .alias("column_indicator"),
-            pl.col("dx_name")
-            .map_elements(process_column, return_dtype=pl.String)
-            .alias("coc_name"),
-        )
-        .with_columns((pl.col("column_indicator")).alias("column_name"))
-        .rename({"dx": "data_element_id", "ou": "organisation_unit_id", "pe": "period"})
-        .pivot(
-            index=["organisation_unit_id", "period"],
-            columns=["column_name"],
-            values="value",
-        )
-    )
-    df_concat = pl.concat([df_ptme, df_ptme_ind], how="diagonal_relaxed")
-
-    df_concat = df_concat.with_columns(
-        [
-            pl.col(c).cast(pl.Float64)
-            for c in df_concat.columns
-            if c not in ["organisation_unit_id", "period"]
-        ]
-    )
-
-    df_concat = (
-        df_concat.group_by(["organisation_unit_id", "period"])  # .fill_null(0)
-        .agg(
-            [
-                pl.when(pl.col(col).is_not_null().any()).then(pl.col(col).sum()).otherwise(None)
-                # pl.sum(col)
-                for col in df_concat.columns
-                if col not in ["organisation_unit_id", "period"]
-            ]
-        )
-        .sort(["organisation_unit_id", "period"])
-    )
-
-    df_concat = df_concat.with_columns(
-        [
-            pl.lit(None).alias(col)
-            for col in DICO_EXPECTED_COLUMNS["PTME"]
-            if col not in df_concat.columns
-        ]
-    )
-
-    current_run.log_info(
-        "✅ Extraction des données pour la pathologie `PTME` effectuée avec succès."
-    )
-    return df_concat.select(
-        ["organisation_unit_id", "period"]
-        + [col for col in DICO_EXPECTED_COLUMNS["PTME"] if col in df_concat.columns]
-    ).with_columns(pl.col(pl.NUMERIC_DTYPES).round(0).cast(pl.Int64))
-
-
-def extract_dhis2_consultant_data(
-    dhis2: DHIS2,
-    periods_list: list[str],
-    ou_ids: list[str],
-    coc: pl.DataFrame,
-) -> pl.DataFrame:
-    """Fetch and process DHIS2 data for Consultants.
-
-    Args:
-        dhis2: DHIS2 connection object.
-        periods_list: List of periods to fetch data for.
-        ou_ids: List of organization unit IDs.
-        coc: DataFrame containing category option combos.
-        df_ptme: DataFrame containing PTME data.
-
-    Returns:
-        A Polars DataFrame containing processed DHIS2 data for consultants.
-    """
-    de_cons = [
-        "YDot5SUphZV",
-        "nUCqISZiVDM",
-        "FFPL8EBoeMd",
-        "Pi7rVfzadYK",
-        "jr6m2WAXchp",
-        "pNCQFe2Z0eS",
-        "xyNw0Rz34hz",
-        "s7agDWyjMWW",
-        "TPe9uUCdila",
-        "Y7ngiZ8a8t7",
-        "eWOytfDFlG2",
-        "ZXdCyi2f1Jg",
-        "q6IrYbibICS",
-        "HiCYvltnIp5",
-    ]
-    current_run.log_info("⏳ Extraction des éléments de données pour les `consultants`...")
-    df_cons = dataframe.extract_analytics(
-        dhis2,
-        periods=periods_list,
-        data_elements=de_cons,
-        org_units=ou_ids,
-        org_unit_levels=[4],
-    )
-    # fetch_dhis2_data(
-    #     dhis2=dhis2, periods_list=periods_list, ou_ids=ou_ids, data_elements_uid=de_cons
-    # )
-    df_cons = (
-        df_cons.join(coc, left_on="category_option_combo_id", right_on="id", how="left").rename(
-            {"name": "coc_name"}
-        )
-        # .drop("attribute_option_combo_id")
-    )
-    current_run.log_info("✅ Extraction des données des `consultants` effectuée avec succès.")
-    return (
-        df_cons.with_columns(
-            pl.lit("indicateur_3").alias("column_indicator"),
-            pl.col("coc_name")
-            .map_elements(
-                lambda x: (
-                    multi_replace(x).replace("Féminin", "").strip().strip(",") + "_F"
-                    if "Féminin" in x
-                    else multi_replace(x).replace("Masculin", "").strip().strip(",") + "_M"
-                    if "Masculin" in x
-                    else multi_replace(x)
-                ),
-                return_dtype=pl.String,
-            )
-            .alias("coc_name"),
-            pl.col("value").cast(pl.Float64),
-        )
-        .with_columns((pl.col("column_indicator") + "_" + pl.col("coc_name")).alias("column_name"))
-        .pivot(
-            index=["organisation_unit_id", "period"],
-            columns=["column_name"],
-            aggregate_function="sum",
-            values="value",
-        )
-    ).with_columns(pl.col(pl.NUMERIC_DTYPES).round(0).cast(pl.Int64))
 
 
 def fetch_dhis2_data(
@@ -835,7 +97,7 @@ def fetch_dhis2_indicators(
         include_cocs=False,
     )
     if results:
-        df_data = pl.DataFrame(results)  # functools.reduce(operator.iadd, results, []))
+        df_data = pl.DataFrame(results)
         if not df_data.is_empty():
             for method in [
                 dhis2.meta.add_org_unit_name_column,
@@ -874,10 +136,6 @@ def filter_consistent_data_by_rules(
         f"Consolidation de la matrice de cohérence des données pour la pathologie `{pathologie}`..."
     )
     df_data_rules = df_data.to_pandas().copy()
-
-    # df_data_rules_info = (
-    #     df_data.to_pandas().copy()
-    # )
 
     df_data_copy = df_data.to_pandas().copy().fillna(0)
 
@@ -932,130 +190,6 @@ def filter_consistent_data_by_rules(
         "data": df_data,
         "workbook": workbook,
     }
-
-
-def extract_dhis2_pec_aggregated_data(
-    dhis2: DHIS2, ou_ids: list[str], coc: pl.DataFrame, periods_list: list[str]
-) -> pl.DataFrame:
-    """Fetch and process DHIS2 data for indicators 11, 14, and PEC.
-
-    Args:
-        dhis2: DHIS2 connection object.
-        ou_ids: List of organization unit IDs.
-        coc: DataFrame containing category option combos.
-        periods_list: List of periods to fetch data for.
-
-    Returns:
-        pl.DataFrame: A Polars DataFrame containing the processed data for indicators 11, 14.
-    """
-    if not any(p.endswith(("03", "06", "09", "12")) for p in periods_list):
-        return pl.DataFrame()
-
-    current_run.log_info(
-        "⏳ Extraction des données aggrégées sur 6 mois pour la pathologie `PEC`..."
-    )
-
-    df_ind = pl.DataFrame()
-    year = int(periods_list[0][:4])
-    periods_map = {
-        "03": (f"{year - 1}10", f"{year}03"),
-        "06": (f"{year}01", f"{year}06"),
-        "09": (f"{year}04", f"{year}09"),
-        "12": (f"{year}07", f"{year}12"),
-    }
-    data_elements = ["zxMJc6KPesz", "ykXAaZFC1bt"]
-    collected_data = []
-    valid_suffixes = {
-        s for s in ("03", "06", "09", "12") if any(p.endswith(s) for p in periods_list)
-    }
-
-    for period_suffix in valid_suffixes:
-        start, end = periods_map[period_suffix]
-        month_range = periods.Month.from_string(start).range(periods.Month.from_string(end))
-        periods_range = [month.period for month in month_range]
-        data = dhis2.analytics.get(
-            periods=periods_range,
-            data_elements=data_elements,
-            org_units=ou_ids,
-        )
-        df = (
-            pl.DataFrame(data)
-            .with_columns(pl.lit(f"{year}{period_suffix}").alias("period"))
-            .select(["dx", "co", "ou", "period", "value"])
-        )
-        collected_data.append(df)
-
-    if not collected_data:
-        return pl.DataFrame()
-
-    df_ind = (
-        pl.concat(collected_data, how="diagonal_relaxed")
-        .rename(
-            {
-                "dx": "column",
-                "co": "category_option_combo_id",
-                "ou": "organisation_unit_id",
-            }
-        )
-        .join(coc, left_on="category_option_combo_id", right_on="id", how="left")
-        .rename({"name": "coc_name"})
-    )
-
-    df_ind = (
-        df_ind.with_columns(
-            pl.col("column")
-            .replace(
-                {"zxMJc6KPesz": "indicateur_11", "ykXAaZFC1bt": "indicateur_14"},
-                default=pl.first(),
-            )
-            .alias("column_indicator"),
-            pl.col("coc_name").map_elements(
-                lambda x: (
-                    multi_replace(x).replace("Féminin", "").strip().strip(",") + "_F"
-                    if "Féminin" in x
-                    else multi_replace(x).replace("Masculin", "").strip().strip(",") + "_M"
-                    if "Masculin" in x
-                    else multi_replace(x)
-                ),
-                return_dtype=pl.String,
-            ),
-        )
-        .with_columns(
-            (pl.col("column_indicator") + "_" + pl.col("coc_name")).alias("column_name"),
-            pl.col("value").cast(pl.Float64),
-        )
-        .pivot(
-            index=["organisation_unit_id", "period"],
-            columns=["column_name"],
-            aggregate_function="sum",
-            values="value",
-        )
-        .rename(lambda x: x.replace(" ", ""))
-    )
-
-    df_ind = df_ind.with_columns(
-        [
-            pl.col(c).cast(pl.Float64)
-            for c in df_ind.columns
-            if c not in ["organisation_unit_id", "period"]
-        ]
-    )
-    df_ind = (
-        df_ind.group_by(["organisation_unit_id", "period"])
-        .agg(
-            [
-                pl.when(pl.col(col).is_not_null().any()).then(pl.col(col).sum()).otherwise(None)
-                for col in df_ind.columns
-                if col not in ["organisation_unit_id", "period"]
-            ]
-        )
-        .sort(["organisation_unit_id", "period"])
-    )
-    current_run.log_info(
-        "✅ Extraction des données aggrégées sur 6 mois pour la "
-        "pathologie `PEC` effectuée avec succès."
-    )
-    return df_ind
 
 
 def transform_for_pnls_reporting(df: pl.DataFrame, map_indicators: dict[str, str]) -> pl.DataFrame:
@@ -1153,7 +287,7 @@ def get_dataframe_color_rules(row, col, dico_rules_col, dataframe):  # noqa: ANN
             functools.partial(remplacement, dataframe=dataframe),
             formula,
         )
-        # print(to_evaluate)
+
         if eval(to_evaluate):
             color_return.append([color, priority])
     try:
@@ -1259,3 +393,70 @@ def export_file(df: pl.DataFrame, fp_historical_data: str, annee_extraction: int
         "Le fichier de données consolidées a été exporté avec succès dans "
         f"le repertoire `{dst_dir.as_posix()}`"
     )
+
+
+def generate_org_unit_uuid(col: str, namespace: uuid.UUID = uuid.NAMESPACE_DNS) -> str:
+    """Generate a UUID for an organization unit based on its name and a namespace.
+
+    Args:
+        col (str): The name or identifier of the organization unit.
+        namespace (uuid.UUID, optional): The namespace to use for UUID generation. 
+                    Defaults to uuid.NAMESPACE_DNS.
+
+    Returns:
+        str: The generated UUID as a string without hyphens.
+    """
+    return str(uuid.uuid5(namespace, col)).replace("-", "")
+
+
+def find_best_match(element: str, values: list[str], threshold: int = 95) -> int | None:
+    """Finds the best match for a given element within a list of values using fuzzy matching.
+
+    This function searches for the exact position of an element in a list of values. If the exact
+    element is not found, it uses fuzzy matching to find the closest match based on a specified
+    threshold.
+
+    Args:
+        element (str): The element to search for in the list of values.
+        values (list of str): The list of values to search within.
+        threshold (int, optional): The minimum score for a fuzzy match to be considered valid.
+            Defaults to 95.
+
+    Returns:
+        int or None: The 1-based index of the best match in the list of values, or None if no
+            match is found.
+    """
+    try:
+        if element in values:
+            return values.index(element) + 1
+        best_match = process.extractOne(element, values, scorer=fuzz.token_set_ratio)
+        if best_match[1] >= threshold:
+            return values.index(best_match[0]) + 1
+        return None
+    except Exception:
+        return None
+
+
+def find_best_match_org_unit_chu(
+    col: str,
+    org_unit_list: list,
+    organisation_units: pl.DataFrame,
+    threshold: int = 90,
+) -> str | None:
+    """Find the best matching organization unit path for a given name using fuzzy matching.
+
+    Args:
+        col (str): The name to match.
+        org_unit_list (list): List of organization unit names.
+        organisation_units (pl.DataFrame): DataFrame containing organization unit information.
+        threshold (int, optional): Minimum score for a match to be considered valid. Defaults to 90.
+
+    Returns:
+        str or None: The path of the best matching organization unit, or None if no match is found.
+    """
+    try:
+        best_match = process.extractOne(col, org_unit_list, scorer=fuzz.token_set_ratio)
+        if best_match[1] >= threshold:
+            return organisation_units.filter(pl.col("name") == best_match[0])["path"][0]
+    except Exception:
+        return None

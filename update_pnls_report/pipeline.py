@@ -11,16 +11,15 @@ from constants import (
     DICO_RULES_PEC,
     DICO_RULES_PTME,
 )
+from extract_consultant_data import extract_dhis2_consultant_data
+from extract_ist_data import extract_dhis2_ist_data
+from extract_naomi_data import extract_naomi_api_data
+from extract_pec_data import extract_dhis2_pec_aggregated_data, extract_dhis2_pec_data
+from extract_ptme_data import extract_dhis2_ptme_data
 from openhexa.sdk import DHIS2Connection, current_run, parameter, pipeline, workspace
 from openhexa.toolbox.dhis2 import DHIS2
 from utils import (
     export_file,
-    extract_dhis2_consultant_data,
-    extract_dhis2_ist_data,
-    extract_dhis2_pec_aggregated_data,
-    extract_dhis2_pec_data,
-    extract_dhis2_ptme_data,
-    extract_naomi_api_data,
     filter_consistent_data_by_rules,
     transform_for_pnls_reporting,
 )
@@ -53,13 +52,12 @@ from utils import (
     type=bool,
     name="Inclure les données incohérentes ?",
     help=(
-        "Ce paramètre permet à l'utilisateur d'inclure les données incohérentes celles, "
-        "c'est-à-dire celles ne respectant pas un ensemble de règles de cohérence définies dans "
-        "la matrice de cohérence des données. ‼️(En règle générale, il est préférable de ne pas "
-        "les inclure)."
+        "Sur la base des analyses conduites par le programme, il est recommandé "
+        "d'inclure ces données afin de faciliter leur revue, leur correction éventuelle, ou leur "
+        "suivi dans une logique d'amélioration continue de la qualité des données."
     ),
     required=False,
-    default=False,
+    default=True,
 )
 def update_pnls_report(
     dhis2_connection: DHIS2Connection,
@@ -79,7 +77,6 @@ def update_pnls_report(
 
     dhis2 = DHIS2(
         connection=dhis2_connection,
-        # cache_dir=Path(workspace.files_path, ".cache"),
     )
 
     df_final = consolidate_dhis2_and_naomi_data(
@@ -96,7 +93,6 @@ def update_pnls_report(
     )
 
 
-# @update_pnls_report.task
 def consolidate_dhis2_and_naomi_data(
     dhis2: DHIS2,
     annee_extraction: int,
@@ -119,10 +115,6 @@ def consolidate_dhis2_and_naomi_data(
         A Polars DataFrame containing the fetched data.
     """
     df_naomi = extract_naomi_api_data(year=annee_extraction, fp_ressources=fp_ressources)
-
-    # df_naomi = pl.read_parquet(
-    #     Path(workspace.files_path, f"data/données spectrum/naomi_data_{annee_extraction}.parquet")
-    # )
 
     coc = pl.DataFrame(dhis2.meta.category_option_combos())
     organisation_units = pl.DataFrame(dhis2.meta.organisation_units())
@@ -377,7 +369,6 @@ def generate_extraction_periods(
     return periods_list
 
 
-# @update_pnls_report.task
 def run_notebook_update_pnls_report(
     df: pl.DataFrame, fp_historical_data: str, annee_extraction: int
 ) -> None:

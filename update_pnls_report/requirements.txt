@@ -1,2 +1,4 @@
 psycopg2-binary
 openhexa.toolbox == 2.6.5
+fuzzywuzzy
+python-Levenshtein
