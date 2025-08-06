@@ -436,10 +436,10 @@ def run_notebook_update_pnls_report(
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    pm.execute_notebook(
-        input_path=input_path.as_posix(),
-        output_path=output_path.as_posix(),
-    )
+    # pm.execute_notebook(
+    #     input_path=input_path.as_posix(),
+    #     output_path=output_path.as_posix(),
+    # )
     current_run.log_info("✅ Le pipeline a été exécuté avec succès. ✅")
 
 
