@@ -11,6 +11,7 @@ from constants import (
     DICO_RULES_PEC,
     DICO_RULES_PTME,
 )
+from extract_chu_data import extract_data_from_excel_file
 from extract_consultant_data import extract_dhis2_consultant_data
 from extract_ist_data import extract_dhis2_ist_data
 from extract_naomi_data import extract_naomi_api_data
@@ -34,6 +35,16 @@ from utils import (
     default="sig-sante-civ-prod",
 )
 @parameter(
+    "fp_chu_data",
+    type=str,
+    name="Fichier Excel des données des CHU",
+    help=(
+        "Fichier Excel contenant les données des CHU pour les pathologies CD, PEC et PTME. "
+        "‼️ Préalablement chargé dans le dossier data/données CHU/"
+    ),
+    required=False,
+)
+@parameter(
     "trimestres",
     type=str,
     name="Trimestre d'extraction des données DHIS2",
@@ -48,22 +59,23 @@ from utils import (
 )
 @parameter("annee_extraction", type=int, name="Année d'extraction", required=True)
 @parameter(
-    "include_inconsistent_data",
+    "exclude_inconsistent_data",
     type=bool,
-    name="Inclure les données incohérentes ?",
+    name="Exclure les données incohérentes ?",
     help=(
         "Sur la base des analyses conduites par le programme, il est recommandé "
         "d'inclure ces données afin de faciliter leur revue, leur correction éventuelle, ou leur "
         "suivi dans une logique d'amélioration continue de la qualité des données."
     ),
     required=False,
-    default=True,
+    default=False,
 )
 def update_pnls_report(
     dhis2_connection: DHIS2Connection,
+    fp_chu_data: str,
     trimestres: list[str],
     annee_extraction: int,
-    include_inconsistent_data: bool = False,
+    exclude_inconsistent_data: bool = False,
     fp_historical_data: str = "data/données historiques/",
     fp_ressources: str = "data/matrice de cohérence/ressources/",
     fp_matrix: str = "data/matrice de cohérence/Matrice de Cohérence BASE NEW.xlsx",
@@ -75,41 +87,60 @@ def update_pnls_report(
     """
     periods_list = generate_extraction_periods(year=annee_extraction, trimestres=trimestres)
 
-    dhis2 = DHIS2(
-        connection=dhis2_connection,
-    )
+    dhis2 = DHIS2(connection=dhis2_connection)
+    organisation_units = pl.DataFrame(dhis2.meta.organisation_units())
 
-    df_final = consolidate_dhis2_and_naomi_data(
+    if fp_chu_data is not None:
+        fp_chu_data = Path(workspace.files_path) / fp_chu_data
+        if not fp_chu_data.exists():
+            msg_error = f"Le fichier des données des CHU `{fp_chu_data}` n'existe pas."
+            current_run.log_error(msg_error)
+            raise FileNotFoundError(f"File {fp_chu_data} does not exist.")
+
+        df_final_chu = extract_data_from_excel_file(
+            file_path=fp_chu_data,
+            fp_ressources=fp_ressources,
+            organisation_units=organisation_units,
+            periods_list=periods_list,
+        )
+
+    df_dhis2_naomi_combined = consolidate_dhis2_and_naomi_data(
         dhis2=dhis2,
+        organisation_units=organisation_units,
         annee_extraction=annee_extraction,
         periods_list=periods_list,
         fp_ressources=fp_ressources,
         fp_matrix=fp_matrix,
-        include_inconsistent_data=include_inconsistent_data,
+        exclude_inconsistent_data=exclude_inconsistent_data,
     )
 
     run_notebook_update_pnls_report(
-        df=df_final, fp_historical_data=fp_historical_data, annee_extraction=annee_extraction
+        df_data_dhis2_naomi=df_dhis2_naomi_combined,
+        df_data_chu=df_final_chu if fp_chu_data else pl.DataFrame(),
+        fp_historical_data=fp_historical_data,
+        annee_extraction=annee_extraction,
     )
 
 
 def consolidate_dhis2_and_naomi_data(
     dhis2: DHIS2,
+    organisation_units: pl.DataFrame,
     annee_extraction: int,
     periods_list: list[str],
     fp_ressources: str,
     fp_matrix: str,
-    include_inconsistent_data: bool,
+    exclude_inconsistent_data: bool,
 ) -> pl.DataFrame:
     """Fetch data from DHIS2.
 
     Args:
         dhis2: The DHIS2 instance.
+        organisation_units: DataFrame containing organization units.
         annee_extraction: The year of data extraction.
         periods_list: A list of periods for which to fetch the data.
         fp_ressources: The path to the resources directory.
         fp_matrix: The path to the matrix directory.
-        include_inconsistent_data: A boolean indicating whether to include inconsistent data.
+        exclude_inconsistent_data: A boolean indicating whether to include inconsistent data.
 
     Returns:
         A Polars DataFrame containing the fetched data.
@@ -117,7 +148,6 @@ def consolidate_dhis2_and_naomi_data(
     df_naomi = extract_naomi_api_data(year=annee_extraction, fp_ressources=fp_ressources)
 
     coc = pl.DataFrame(dhis2.meta.category_option_combos())
-    organisation_units = pl.DataFrame(dhis2.meta.organisation_units())
     ou_ids = (
         organisation_units.filter(pl.col("level") == 4).select("id").unique().to_series().to_list()
     )
@@ -134,7 +164,7 @@ def consolidate_dhis2_and_naomi_data(
     dico_ist = filter_consistent_data_by_rules(
         df_data=df_ist,
         organisation_units=organisation_units,
-        include_inconsistent_data=include_inconsistent_data,
+        exclude_inconsistent_data=exclude_inconsistent_data,
         dico_rules=DICO_RULES_IST,
         workbook=workbook,
         pathologie="IST CD",
@@ -152,7 +182,7 @@ def consolidate_dhis2_and_naomi_data(
     dico_pec = filter_consistent_data_by_rules(
         df_data=df_pec,
         organisation_units=organisation_units,
-        include_inconsistent_data=include_inconsistent_data,
+        exclude_inconsistent_data=exclude_inconsistent_data,
         dico_rules=DICO_RULES_PEC,
         workbook=workbook,
         pathologie="PEC",
@@ -175,7 +205,7 @@ def consolidate_dhis2_and_naomi_data(
     dico_ptme = filter_consistent_data_by_rules(
         df_data=df_ptme,
         organisation_units=organisation_units,
-        include_inconsistent_data=include_inconsistent_data,
+        exclude_inconsistent_data=exclude_inconsistent_data,
         dico_rules=DICO_RULES_PTME,
         workbook=workbook,
         pathologie="PTME",
@@ -370,16 +400,31 @@ def generate_extraction_periods(
 
 
 def run_notebook_update_pnls_report(
-    df: pl.DataFrame, fp_historical_data: str, annee_extraction: int
+    df_data_dhis2_naomi: pl.DataFrame,
+    df_data_chu: pl.DataFrame,
+    fp_historical_data: str,
+    annee_extraction: int,
 ) -> None:
     """Run a Jupyter notebook for data extraction.
 
     Args:
-    df: The DataFrame to export.
+    df_data_dhis2_naomi: The DataFrame to export.
+    df_data_chu: The DataFrame containing CHU data.
     fp_historical_data: The path to the historical data directory.
     annee_extraction: The year of data extraction.
     """
-    export_file(df, fp_historical_data=fp_historical_data, annee_extraction=annee_extraction)
+    export_file(
+        df_data_dhis2_naomi,
+        fp_historical_data=fp_historical_data,
+        annee_extraction=annee_extraction,
+    )
+    if not df_data_chu.is_empty():
+        export_file(
+            df_data_chu,
+            fp_historical_data=fp_historical_data,
+            annee_extraction=annee_extraction,
+            file_dir="CHU",
+        )
 
     current_run.log_info(
         "Exécution du notebook de rafraîchissement des données du rapport PVVIH pédiatrique."

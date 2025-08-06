@@ -151,6 +151,27 @@ DICO_COLUMNS = {
     },
 }
 
+SHEET_RENAMES = {
+    "CD": {
+        "Nombre de clients conseillés et dépistés pour le VIH ayant reçu le résultat du test": "indicateur_10",  # noqa: E501
+        "Nombre de clients dépistés positif": "indicateur_12",
+    },
+    "PEC": {
+        "Nombre de Patients dépistés positifs au VIH dans la communauté, référés et nouvellement enrôlés dans les soins VIH": "indicateur_1",  # noqa: E501
+        "Nombre de Patients VIH positif dont le résultat de la charge virale a été reçu au cours du mois": "indicateur_8",  # noqa: E501
+        "Nombre de Patients VIH positif sous traitement ARV dont le résultat de la charge virale est ≤ 1000 copies/ml au cours du mois": "indicateur_9",  # noqa: E501
+        "Nombre de Patients VIH positif ayant nouvellement commencé (initié) le traitement ARV dans l'établissement au cours du mois": "indicateur_10",  # noqa: E501
+        "Nombre de Patients VIH positif sous ARV (file active)": "indicateur_11",
+        "Nombre de patients VIH positif ayant débuté le traitement de la tuberculose dans l'établissement": "indicateur_14",  # noqa: E501
+        "Nombre total de patients de la cohorte à 12 mois de suivi (Z)": "indicateur_17",
+        "Nombre total de patients de la cohorte en vie et sous \xa0traitement ARV 12 mois après le début du traitement (V)": "indicateur_18",  # noqa: E501
+    },
+    "PTME": {
+        "Nombre de femmes enceintes séronégatives au VIH ayant bénéficié d'un «\xa0retesting\xa0» Maternité": "indicateur_12",  # noqa: E501
+        "Nombre d'enfants nés de mères séropositives au VIH dépistés VIH positif": "indicateur_31",  # noqa: E501
+    },
+}
+
 DICO_EXPECTED_COLUMNS = {
     "IST": [
         "indicateur_1_age_10_14_ans",

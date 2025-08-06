@@ -2,6 +2,7 @@ import contextlib
 import functools
 import re
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -14,7 +15,7 @@ from constants import (
     COLUMN_NAME_GROUP_AGE,
     MAP_AGE_GROUP,
 )
-from fuzzywuzzy import fuzz, process
+from fuzzywuzzy import fuzz, process  # pyright: ignore[reportMissingImports]
 from openhexa.sdk import current_run, workspace
 from openhexa.toolbox.dhis2 import DHIS2, dataframe, periods
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -114,7 +115,7 @@ def fetch_dhis2_indicators(
 def filter_consistent_data_by_rules(
     df_data: pl.DataFrame,
     organisation_units: pl.DataFrame,
-    include_inconsistent_data: bool,
+    exclude_inconsistent_data: bool,
     dico_rules: dict[str, str],
     workbook: pyxl.Workbook,
     pathologie: str,
@@ -124,7 +125,7 @@ def filter_consistent_data_by_rules(
     Args:
         df_data: A Polars DataFrame containing the data to be filtered.
         organisation_units: A DataFrame containing organization unit information.
-        include_inconsistent_data: A boolean indicating whether to include inconsistent data.
+        exclude_inconsistent_data: A boolean indicating whether to include inconsistent data.
         dico_rules: A dictionary containing rules for consistency checks.
         workbook: A Workbook object for accessing the rules.
         pathologie: A string representing the pathology name.
@@ -176,7 +177,7 @@ def filter_consistent_data_by_rules(
 
     df_filtered = df_data_rules[df_data_rules[columns_to_check].isna().all(axis=1)]
 
-    if not include_inconsistent_data:
+    if exclude_inconsistent_data:
         current_run.log_info(
             f"🛠️ Filtre des données incohérentes à partir de la matrice de cohérence "
             f"des données pour la pathologie `{pathologie}`..."
@@ -373,15 +374,18 @@ def add_organisation_units(df: pl.DataFrame, organisation_units: pl.DataFrame) -
     ).sort(["period", "region", "district"])
 
 
-def export_file(df: pl.DataFrame, fp_historical_data: str, annee_extraction: int):
+def export_file(
+    df: pl.DataFrame, fp_historical_data: str, annee_extraction: int, file_dir: str = "OH"
+):
     """Export the DataFrame to a Parquet file.
 
     Args:
         df: The DataFrame to export.
         fp_historical_data: The path to the historical data directory.
         annee_extraction: The year of data extraction.
+        file_dir: The directory where the file will be saved. Defaults to "OH".
     """
-    dst_dir = Path(workspace.files_path) / f"{fp_historical_data}/{annee_extraction}_OH"
+    dst_dir = Path(workspace.files_path) / f"{fp_historical_data}/{annee_extraction}_{file_dir}"
     dst_dir.mkdir(parents=True, exist_ok=True)
 
     for period in df.select("periode").sort("periode").unique().to_series().to_list():
@@ -400,7 +404,7 @@ def generate_org_unit_uuid(col: str, namespace: uuid.UUID = uuid.NAMESPACE_DNS) 
 
     Args:
         col (str): The name or identifier of the organization unit.
-        namespace (uuid.UUID, optional): The namespace to use for UUID generation. 
+        namespace (uuid.UUID, optional): The namespace to use for UUID generation.
                     Defaults to uuid.NAMESPACE_DNS.
 
     Returns:
@@ -428,16 +432,16 @@ def find_best_match(element: str, values: list[str], threshold: int = 95) -> int
     """
     try:
         if element in values:
-            return values.index(element) + 1
+            return values.index(element)
         best_match = process.extractOne(element, values, scorer=fuzz.token_set_ratio)
         if best_match[1] >= threshold:
-            return values.index(best_match[0]) + 1
+            return values.index(best_match[0])
         return None
     except Exception:
         return None
 
 
-def find_best_match_org_unit_chu(
+def match_org_unit_chu(
     col: str,
     org_unit_list: list,
     organisation_units: pl.DataFrame,
@@ -460,3 +464,77 @@ def find_best_match_org_unit_chu(
             return organisation_units.filter(pl.col("name") == best_match[0])["path"][0]
     except Exception:
         return None
+
+
+def match_org_unit_with_data(
+    query: str,
+    orgunit: list,
+    fuzzy_threshold: int = 90,
+) -> str | None:
+    """Find the best matching organization unit for a given query using fuzzy matching.
+
+    Args:
+        query (str): The query string to match against organization units.
+        orgunit (list): List of organization unit names to search within.
+        fuzzy_threshold (int, optional): Minimum score for a match to be considered valid.
+                                         Defaults to 90.
+
+    Returns:
+        str or None: The best matching organization unit name, or None if no match is found.
+    """
+    query_norm = normalize_text(query)
+    candidates_norm = [normalize_text(o) for o in orgunit]
+
+    try:
+        best_match = process.extractOne(query_norm, candidates_norm, scorer=fuzz.token_set_ratio)
+        if best_match and best_match[1] >= fuzzy_threshold:
+            matched_norm = best_match[0]
+            return orgunit[candidates_norm.index(matched_norm)]
+    except Exception:
+        pass
+
+    return None
+
+
+def rename_or_drop_column_if_found(
+    df: pl.DataFrame,
+    target_name: str,
+    candidates: list[str],
+    drop: bool = False,
+) -> tuple[pl.DataFrame, bool]:
+    """Rename or drop a column in a DataFrame if it matches any of the candidates.
+
+    Args:
+        df: The DataFrame to process.
+        target_name: The name to rename the column to if found.
+        candidates: A list of candidate column names to match against.
+        drop: If True, the column will be dropped instead of renamed.
+
+    Returns:
+        A tuple containing the modified DataFrame and a boolean indicating if a match was found.
+    """
+    for label in candidates:
+        idx = find_best_match(label, df.columns)
+        if idx is not None:
+            if drop:
+                return df.drop(df.columns[idx]), True
+            return df.rename({df.columns[idx]: target_name}), True
+    return df, False
+
+
+CLEAN_PATTERN = re.compile(r"[^\w\s-]")
+
+
+def normalize_text(input_str: str) -> str:
+    """Normalize and sanitize string for safe file/table names.
+
+    Args:
+        input_str: Original input string
+
+    Returns:
+        Normalized string with special characters removed
+    """
+    normalized = unicodedata.normalize("NFD", input_str)
+    cleaned = "".join(c for c in normalized if not unicodedata.combining(c))
+    sanitized = CLEAN_PATTERN.sub("", cleaned)
+    return sanitized.strip().replace("public", "").replace("-", " ").lower()
