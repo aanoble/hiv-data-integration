@@ -33,7 +33,7 @@ def extract_data_from_excel_file(
     """
     sheetnames = pd.ExcelFile(file_path).sheet_names
     current_run.log_info(
-        f"📄 Extraction des données à partir du fichier Excel des CHU `{file_path.name}`..."
+        f"⏳ Extraction des données à partir du fichier Excel des CHU `{file_path.name}`..."
     )
     df_cd = extract_data_from_sheet(file_path, "CD", sheetnames)
     df_pec = extract_data_from_sheet(file_path, "PEC", sheetnames)
@@ -127,37 +127,27 @@ def extract_data_from_excel_file(
         },
     )
 
-    df_final = pl.concat(
-        [
-            df_cd,
-            df_pec,
-            df_pec_agg,
-            df_ptme,
-        ],
-        how="diagonal_relaxed",
+    df_final = (
+        pl.concat(
+            [
+                df_cd,
+                df_pec,
+                df_pec_agg,
+                df_ptme,
+            ],
+            how="diagonal_relaxed",
+        )
+        .group_by(["organisation_unit_id", "period", "indicateur"])
+        .agg(pl.all().sum())
     )
 
-    df_final = (
-        df_final.join(
-            organisation_units.filter(pl.col("level").is_in([4, 3])).select(["id", "path"]),
-            left_on="organisation_unit_id",
-            right_on="id",
-            how="left",
-        )
-        .with_columns(
-            pl.col("path")
-            .str.replace_all("/", "_")
-            .str.replace_all(r"_ZD44Asc0bAk_", "", literal=True)
-            .alias("organisation_unit_id"),
-            pl.col("period")
-            .cast(pl.Utf8)
-            .str.strptime(pl.Datetime("ns"), "%Y%m")
-            .cast(pl.Date)
-            .alias("period"),
-        )
-        .drop("path")
-        .rename({"period": "periode", "indicateur": "Indicateur", "organisation_unit_id": "idsite"})
-    )
+    df_final = df_final.with_columns(
+        pl.col("organisation_unit_id")
+        .str.replace_all("/", "_")
+        .str.replace_all(r"_ZD44Asc0bAk_", "", literal=True)
+        .alias("organisation_unit_id"),
+        pl.col("period").cast(pl.Date).alias("period"),
+    ).rename({"period": "periode", "indicateur": "Indicateur", "organisation_unit_id": "idsite"})
     return df_final.with_columns(
         [
             pl.lit(None).alias(col)
@@ -490,8 +480,12 @@ def fetch_chu_pec_aggregates(
         raise FileNotFoundError(f"File {fp_historique_pec} does not exist.")
     df_historique_pec = pl.read_parquet(fp_historique_pec)
 
-    df_historique_pec = pl.concat([df_pec, df_historique_pec], how="diagonal_relaxed").sort(
-        by=["organisation_unit_id", "periode"],
+    df_historique_pec = (
+        pl.concat([df_pec, df_historique_pec], how="diagonal_relaxed")
+        .sort(
+            by=["organisation_unit_id", "periode"],
+        )
+        .unique()
     )
     # Mise à jour des données historiques suivant les nouvelles données
     df_historique_pec.write_parquet(fp_historique_pec)

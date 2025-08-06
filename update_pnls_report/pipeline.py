@@ -37,10 +37,10 @@ from utils import (
 @parameter(
     "fp_chu_data",
     type=str,
-    name="Fichier Excel des données des CHU",
+    name="Fichier Excel des CHU",
     help=(
         "Fichier Excel contenant les données des CHU pour les pathologies CD, PEC et PTME. "
-        "‼️ Préalablement chargé dans le dossier data/données CHU/"
+        "‼️ Préalablement chargé dans le dossier `data/données CHU/`"
     ),
     required=False,
 )
@@ -57,7 +57,7 @@ from utils import (
         "T4 (Octobre - Décembre)",
     ],
 )
-@parameter("annee_extraction", type=int, name="Année d'extraction", required=True)
+@parameter("annee_extraction", type=int, name="Année d'extraction", required=True, default=2024)
 @parameter(
     "exclude_inconsistent_data",
     type=bool,
@@ -91,7 +91,7 @@ def update_pnls_report(
     organisation_units = pl.DataFrame(dhis2.meta.organisation_units())
 
     if fp_chu_data is not None:
-        fp_chu_data = Path(workspace.files_path) / fp_chu_data
+        fp_chu_data = Path(workspace.files_path, "data/données CHU/") / fp_chu_data
         if not fp_chu_data.exists():
             msg_error = f"Le fichier des données des CHU `{fp_chu_data}` n'existe pas."
             current_run.log_error(msg_error)
@@ -368,7 +368,6 @@ def consolidate_dhis2_and_naomi_data(
     return df_final
 
 
-# @update_pnls_report.task
 def generate_extraction_periods(
     year: int,
     trimestres: list[str],
@@ -413,11 +412,12 @@ def run_notebook_update_pnls_report(
     fp_historical_data: The path to the historical data directory.
     annee_extraction: The year of data extraction.
     """
-    export_file(
-        df_data_dhis2_naomi,
-        fp_historical_data=fp_historical_data,
-        annee_extraction=annee_extraction,
-    )
+    if not df_data_dhis2_naomi.is_empty():
+        export_file(
+            df_data_dhis2_naomi,
+            fp_historical_data=fp_historical_data,
+            annee_extraction=annee_extraction,
+        )
     if not df_data_chu.is_empty():
         export_file(
             df_data_chu,
@@ -432,14 +432,15 @@ def run_notebook_update_pnls_report(
     timestamp = datetime.now().strftime("%Y-%m-%d")
     input_path = Path(workspace.files_path, "pipeline_automation/main_program.ipynb")
     output_path = Path(
-        workspace.files_path, f"pipeline_automation/execution/output_main_program_{timestamp}.ipynb"
+        workspace.files_path,
+        f"pipeline_automation/output_notebook_execution/output_main_program_{timestamp}.ipynb",
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # pm.execute_notebook(
-    #     input_path=input_path.as_posix(),
-    #     output_path=output_path.as_posix(),
-    # )
+    pm.execute_notebook(
+        input_path=input_path.as_posix(),
+        output_path=output_path.as_posix(),
+    )
     current_run.log_info("✅ Le pipeline a été exécuté avec succès. ✅")
 
 
