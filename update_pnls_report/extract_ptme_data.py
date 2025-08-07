@@ -59,18 +59,10 @@ def extract_dhis2_ptme_data(
         org_units=ou_ids,
         org_unit_levels=[4],
     )
-    # fetch_dhis2_data(
-    #     dhis2=dhis2,
-    #     periods_list=periods_list,
-    #     ou_ids=ou_ids,
-    #     data_elements_uid=de_ptme,
-    # )
-    df_ptme = (
-        df_ptme.join(coc, left_on="category_option_combo_id", right_on="id", how="left").rename(
-            {"name": "coc_name"}
-        )
-        # .drop("attribute_option_combo_id")
-    )
+
+    df_ptme = df_ptme.join(
+        coc, left_on="category_option_combo_id", right_on="id", how="left"
+    ).rename({"name": "coc_name"})
 
     df_ptme = (
         df_ptme.with_columns(
@@ -168,11 +160,10 @@ def extract_dhis2_ptme_data(
     )
 
     df_concat = (
-        df_concat.group_by(["organisation_unit_id", "period"])  # .fill_null(0)
+        df_concat.group_by(["organisation_unit_id", "period"])
         .agg(
             [
                 pl.when(pl.col(col).is_not_null().any()).then(pl.col(col).sum()).otherwise(None)
-                # pl.sum(col)
                 for col in df_concat.columns
                 if col not in ["organisation_unit_id", "period"]
             ]

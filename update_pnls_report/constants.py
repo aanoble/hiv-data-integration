@@ -1,3 +1,5 @@
+"""Constants for the PNLs report pipeline."""
+
 COLUMN_NAME_GROUP_AGE = {
     "0-4 ans": "age_0_4_ans",
     "05-09 ans": "age_05_09_ans",

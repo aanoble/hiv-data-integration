@@ -1,3 +1,5 @@
+"""Extracts and processes data from CHU Excel files for PNLs reporting."""
+
 import functools
 from datetime import datetime
 from pathlib import Path
@@ -298,7 +300,7 @@ def standardize_org_units(
         pl.col("formations_sanitaires")
         .map_elements(
             lambda col: match_org_unit_with_data(
-                col, df_org_unit_chu["formations_sanitaires"].unique().to_list()
+                col, df_org_unit_chu["formations_sanitaires"].unique().to_list(), 95
             ),
             return_dtype=pl.String,
         )
@@ -332,13 +334,21 @@ def standardize_org_units(
             .otherwise(pl.col("organisation_unit_id"))
             .alias("organisation_unit_id"),
         )
-
+        col = (
+            "districts_sanitaires"
+            if "districts_sanitaires" in df_org_unit_current.columns
+            else "formations_sanitaires"
+        )
         df_org_unit_chu = df_org_unit_chu.with_columns(
             pl.when(pl.col("organisation_unit_id").is_null())
             .then(
-                pl.col("formations_sanitaires").map_elements(
+                pl.col(col).map_elements(
                     lambda col: match_org_unit_chu(
-                        col,
+                        col.upper()
+                        .replace("PUBLIC", "")
+                        .replace("CHU", "")
+                        .replace(" DE ", "")
+                        .strip(),
                         organisation_units.filter(pl.col("level") == 3)["name"],
                         organisation_units,
                     ),
@@ -348,9 +358,6 @@ def standardize_org_units(
             .otherwise(pl.lit(None))
             .alias("districts_sanitaires_id_new"),
         )
-
-        # Génération de l'ID d'unité d'organisation
-        # si l'ID d'unité d'organisation est toujours null
         df_org_unit_chu = df_org_unit_chu.with_columns(
             pl.struct(
                 ["organisation_unit_id", "formations_sanitaires", "districts_sanitaires_id_new"]
@@ -362,15 +369,19 @@ def standardize_org_units(
                     f"{row['districts_sanitaires_id_new']}/"
                     f"{generate_org_unit_uuid(row['formations_sanitaires'])}"
                 )
+                if row["districts_sanitaires_id_new"] is not None
+                else None
             )
             .alias("organisation_unit_id")
         )
     # Exportation du dataframe des unités d'organisation CHU
-    df_org_unit_chu = df_org_unit_chu.select(["organisation_unit_id"] + ou_columns)
+    df_org_unit_chu = df_org_unit_chu.select(["organisation_unit_id"] + ou_columns).filter(
+        pl.col("organisation_unit_id").is_not_null()
+    )
     df_org_unit_chu.write_parquet(fp_org_unit_chu)
 
     df_org_unit_current = df_org_unit_current.with_columns(
-        pl.when(pl.col("formations_sanitaires_new").is_not_null())
+        pl.when(pl.col("formations_sanitaires_new").is_null())
         .then(
             pl.col("formations_sanitaires").map_elements(
                 lambda col: match_org_unit_with_data(
@@ -379,7 +390,7 @@ def standardize_org_units(
                 return_dtype=pl.String,
             )
         )
-        .otherwise(pl.lit("formations_sanitaires_new"))
+        .otherwise(pl.col("formations_sanitaires_new"))
         .alias("formations_sanitaires_new"),
     )
 
@@ -452,8 +463,8 @@ def merge_with_chu_org_units(data: pl.DataFrame, df_org_unit: pl.DataFrame) -> p
             for c in list_columns
         ]
     )
-
-    return data.with_columns(pl.col(pl.NUMERIC_DTYPES).round(0).cast(pl.Int64))
+    data = data.with_columns(pl.col(pl.NUMERIC_DTYPES).round(0).cast(pl.Int64))
+    return data.group_by(["organisation_unit_id", "periode"]).agg(pl.all().sum())
 
 
 def fetch_chu_pec_aggregates(

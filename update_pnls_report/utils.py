@@ -21,6 +21,24 @@ from openhexa.toolbox.dhis2 import DHIS2, dataframe, periods
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 
+def last_analytics_update(dhis2: DHIS2) -> datetime | None:
+    """Get the last update date of the analytics tables.
+
+    Parameters
+    ----------
+    dhis2 : DHIS2
+        The DHIS2 instance to check.
+
+    Returns
+    -------
+    datetime | None
+        The last update date of the analytics tables. Returns None if the analytics tables have
+        never been updated.
+    """
+    dtime_str = dhis2.meta.system_info().get("lastAnalyticsTableSuccess")
+    return datetime.fromisoformat(dtime_str) if dtime_str else None
+
+
 def fetch_dhis2_data(
     dhis2: DHIS2,
     periods_list: list[str],

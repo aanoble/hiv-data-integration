@@ -1,4 +1,4 @@
-"""Template for newly generated pipelines."""
+"""Pipeline for updating PNLs report with DHIS2 and CHU data."""
 
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +22,7 @@ from openhexa.toolbox.dhis2 import DHIS2
 from utils import (
     export_file,
     filter_consistent_data_by_rules,
+    last_analytics_update,
     transform_for_pnls_reporting,
 )
 
@@ -104,18 +105,18 @@ def update_pnls_report(
             periods_list=periods_list,
         )
 
-    df_dhis2_naomi_combined = consolidate_dhis2_and_naomi_data(
-        dhis2=dhis2,
-        organisation_units=organisation_units,
-        annee_extraction=annee_extraction,
-        periods_list=periods_list,
-        fp_ressources=fp_ressources,
-        fp_matrix=fp_matrix,
-        exclude_inconsistent_data=exclude_inconsistent_data,
-    )
+    # df_dhis2_naomi_combined = consolidate_dhis2_and_naomi_data(
+    #     dhis2=dhis2,
+    #     organisation_units=organisation_units,
+    #     annee_extraction=annee_extraction,
+    #     periods_list=periods_list,
+    #     fp_ressources=fp_ressources,
+    #     fp_matrix=fp_matrix,
+    #     exclude_inconsistent_data=exclude_inconsistent_data,
+    # )
 
     run_notebook_update_pnls_report(
-        df_data_dhis2_naomi=df_dhis2_naomi_combined,
+        df_data_dhis2_naomi=pl.DataFrame(),
         df_data_chu=df_final_chu if fp_chu_data else pl.DataFrame(),
         fp_historical_data=fp_historical_data,
         annee_extraction=annee_extraction,
@@ -145,6 +146,14 @@ def consolidate_dhis2_and_naomi_data(
     Returns:
         A Polars DataFrame containing the fetched data.
     """
+    # log last update of analytics tables
+    last_update = last_analytics_update(dhis2)
+    if last_update:
+        current_run.log_info(
+            "Dernière mise à jour des tables analytiques: "
+            f"{last_update.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
     df_naomi = extract_naomi_api_data(year=annee_extraction, fp_ressources=fp_ressources)
 
     coc = pl.DataFrame(dhis2.meta.category_option_combos())
@@ -437,10 +446,10 @@ def run_notebook_update_pnls_report(
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    pm.execute_notebook(
-        input_path=input_path.as_posix(),
-        output_path=output_path.as_posix(),
-    )
+    # pm.execute_notebook(
+    #     input_path=input_path.as_posix(),
+    #     output_path=output_path.as_posix(),
+    # )
     current_run.log_info("✅ Le pipeline a été exécuté avec succès. ✅")
 
 
