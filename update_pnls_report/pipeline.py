@@ -105,18 +105,18 @@ def update_pnls_report(
             periods_list=periods_list,
         )
 
-    # df_dhis2_naomi_combined = consolidate_dhis2_and_naomi_data(
-    #     dhis2=dhis2,
-    #     organisation_units=organisation_units,
-    #     annee_extraction=annee_extraction,
-    #     periods_list=periods_list,
-    #     fp_ressources=fp_ressources,
-    #     fp_matrix=fp_matrix,
-    #     exclude_inconsistent_data=exclude_inconsistent_data,
-    # )
+    df_dhis2_naomi_combined = consolidate_dhis2_and_naomi_data(
+        dhis2=dhis2,
+        organisation_units=organisation_units,
+        annee_extraction=annee_extraction,
+        periods_list=periods_list,
+        fp_ressources=fp_ressources,
+        fp_matrix=fp_matrix,
+        exclude_inconsistent_data=exclude_inconsistent_data,
+    )
 
     run_notebook_update_pnls_report(
-        df_data_dhis2_naomi=pl.DataFrame(),
+        df_data_dhis2_naomi=df_dhis2_naomi_combined,
         df_data_chu=df_final_chu if fp_chu_data else pl.DataFrame(),
         fp_historical_data=fp_historical_data,
         annee_extraction=annee_extraction,
@@ -446,10 +446,10 @@ def run_notebook_update_pnls_report(
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # pm.execute_notebook(
-    #     input_path=input_path.as_posix(),
-    #     output_path=output_path.as_posix(),
-    # )
+    pm.execute_notebook(
+        input_path=input_path.as_posix(),
+        output_path=output_path.as_posix(),
+    )
     current_run.log_info("✅ Le pipeline a été exécuté avec succès. ✅")
 
 
